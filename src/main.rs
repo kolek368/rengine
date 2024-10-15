@@ -1,4 +1,4 @@
-use std::{thread::sleep, time::Duration};
+use std::{collections::BTreeMap, thread::sleep, time::Duration};
 
 use raylib::prelude::*;
 
@@ -14,14 +14,41 @@ const BALL_WIDTH: i32 = 40;
 const BALL_HEIGHT: i32 = 40;
 const BALL_SPEED: i32 = 10;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum GameState {
-    _Menu, // Main menu
+    Menu, // Main menu
     _Options, // Option menu
     _NewGame, // Start new game
     Loop, // Game main loop
     Scored, // Player scored
     _Finished, // Game finished
+    Quit, // Quit game
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum MenuState {
+    #[default]
+    NewGame,
+    Options,
+    Quit,
+}
+
+impl MenuState {
+    fn next(&self) -> MenuState {
+        match self {
+            MenuState::NewGame => MenuState::Options,
+            MenuState::Options => MenuState::Quit,
+            MenuState::Quit => MenuState::NewGame,
+        }
+    }
+
+    fn prev(&self) -> MenuState {
+        match self {
+            MenuState::NewGame => MenuState::Quit,
+            MenuState::Options => MenuState::NewGame,
+            MenuState::Quit => MenuState::Options,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -34,6 +61,12 @@ struct GameContext {
     score_left: i32,
     score_right: i32,
     state: GameState,
+    state_menu: StateMenuContext,
+}
+
+#[derive(Default)]
+struct StateMenuContext {
+    current: MenuState,
 }
 
 #[derive(Debug)]
@@ -171,15 +204,52 @@ fn main() {
     let mut game: GameContext = GameContext {
         score_left: 0,
         score_right: 0,
-        state: GameState::Loop,
+        state: GameState::Menu,
+        state_menu: Default::default()
     };
 
-    while !rl.window_should_close() {
+    while !rl.window_should_close() && game.state != GameState::Quit {
         match game.state {
             GameState::Loop => loop_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Scored => scored_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
+            GameState::Menu => menu_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             _ => sleep(Duration::from_secs(1)),
         }
+    }
+}
+
+fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    let menu_messages: BTreeMap<&str, MenuState> = BTreeMap::from([
+        ("New Game", MenuState::NewGame), 
+        ("Options", MenuState::Options), 
+        ("Quit", MenuState::Quit),
+    ]);
+
+    if rl.is_key_pressed(KeyboardKey::KEY_DOWN) {
+        game.state_menu.current = game.state_menu.current.next();
+    } else if rl.is_key_pressed(KeyboardKey::KEY_UP) {
+        game.state_menu.current = game.state_menu.current.prev();
+    } else if rl.is_key_pressed(KeyboardKey::KEY_ENTER) {
+        if game.state_menu.current == MenuState::Quit {
+            game.state = GameState::Quit;
+            return;
+        } else if game.state_menu.current == MenuState::NewGame {
+            game.state = GameState::Loop;
+            return;
+        }
+    }
+
+    let mut d = rl.begin_drawing(&thread);
+    let mut y_offset = 80;
+    d.clear_background(Color::BLACK);
+    for menu_message in menu_messages {
+        let menu_message_width = d.measure_text(menu_message.0, 40);
+        if menu_message.1 == game.state_menu.current {
+            d.draw_text(menu_message.0, RES_WIDTH/2 - menu_message_width/2, y_offset, 40, Color::RED);
+        } else {
+            d.draw_text(menu_message.0, RES_WIDTH/2 - menu_message_width/2, y_offset, 40, Color::WHITE);
+        }
+        y_offset = y_offset + 80;
     }
 }
 

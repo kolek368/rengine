@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, thread::sleep, time::Duration};
+use std::collections::BTreeMap;
 
-use raylib::prelude::*;
+use raylib::{ffi::GetRandomValue, prelude::*};
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -17,11 +17,10 @@ const BALL_SPEED: i32 = 10;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GameState {
     Menu, // Main menu
-    _Options, // Option menu
-    _NewGame, // Start new game
+    Init, // Initialize state
     Loop, // Game main loop
     Scored, // Player scored
-    _Finished, // Game finished
+    Finished, // Game finished
     Quit, // Quit game
 }
 
@@ -133,13 +132,22 @@ impl Ball {
 
     fn update(&mut self, _ctx: &RaylibHandle, player_left: &Paddle, player_right: &Paddle, game: &mut GameContext) ->  GameState {
         let self_rect = self.rect();
+        let velocity_y_sign = if self.velocity_y < 0 { -1 } else { 1 };
         if self_rect.check_collision_recs(&player_left.rect()) {
-            self.velocity_x = -self.velocity_x;
+            unsafe {
+                self.velocity_x = -(self.velocity_x + GetRandomValue(0, 5));
+                self.velocity_y = velocity_y_sign * (BALL_SPEED + GetRandomValue(0, 3));
+            }
             self.pos_x = self.pos_x + player_left.width;
+            println!("Velocity x: {} y: {}", self.velocity_x, self.velocity_y);
             return game.state;
         } else if self_rect.check_collision_recs(&player_right.rect()) {
-            self.velocity_x = -self.velocity_x;
-            self.pos_x = self.pos_x - player_left.width;
+            unsafe {
+                self.velocity_x = -(self.velocity_x + GetRandomValue(0, 5));
+                self.velocity_y = velocity_y_sign * (BALL_SPEED + GetRandomValue(0, 3));
+            }
+            self.pos_x = self.pos_x - self.width;
+            println!("Velocity x: {} y: {}", self.velocity_x, self.velocity_y);
             return game.state;
         }
 
@@ -159,7 +167,20 @@ impl Ball {
             self.velocity_x = -self.velocity_x;
             game.state = GameState::Scored;
         }
+
         game.state
+    }
+}
+
+fn get_winning_score() -> i32 {
+    10
+}
+
+fn get_winner(game: &GameContext) -> &str {
+    if game.score_left == get_winning_score() {
+        return "One";
+    } else {
+        return "Two";
     }
 }
 
@@ -210,12 +231,51 @@ fn main() {
 
     while !rl.window_should_close() && game.state != GameState::Quit {
         match game.state {
+            GameState::Init => init_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Loop => loop_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Scored => scored_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Menu => menu_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
-            _ => sleep(Duration::from_secs(1)),
+            GameState::Finished => finished_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
+            _ => game.state = GameState::Quit,
         }
     }
+}
+
+fn init_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, _rl: &mut RaylibHandle, _thread: &RaylibThread) {
+    ball.pos_x = RES_WIDTH/2;
+    ball.pos_y = RES_HEIGHT/2;
+    player_one.pos_y = RES_HEIGHT/2;
+    player_two.pos_y = RES_HEIGHT/2;
+
+    game.score_left = 0;
+    game.score_right = 0;
+    game.state = GameState::Loop;
+}
+
+fn finished_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    if !(game.score_left >= get_winning_score() || game.score_right >= get_winning_score()) {
+        game.state = GameState::Loop;
+    }
+
+    if rl.is_key_pressed(KeyboardKey::KEY_N) {
+        game.state = GameState::Quit;
+        return;
+    }
+
+    if rl.is_key_pressed(KeyboardKey::KEY_Y) {
+        game.state = GameState::Init;
+        return;
+    }
+
+    let mut d = rl.begin_drawing(&thread);
+    let y_offset = 80;
+    let finished_message = format!("Game finished, Player {} won.", get_winner(game));
+    let continue_message = "Do you want to play again?";
+    let yes_no_message = "Y / N";
+    d.clear_background(Color::BLACK);
+    d.draw_text(&finished_message, RES_WIDTH/2 - d.measure_text(&finished_message, 40)/2, y_offset, 40, Color::RED);
+    d.draw_text(&continue_message, RES_WIDTH/2 - d.measure_text(&continue_message, 40)/2, y_offset + 80, 40, Color::RED);
+    d.draw_text(&yes_no_message, RES_WIDTH/2 - d.measure_text(&yes_no_message, 60)/2, y_offset + 160, 60, Color::RED);
 }
 
 fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
@@ -254,8 +314,21 @@ fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ba
 }
 
 fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    if game.score_right >= get_winning_score() || game.score_left >= get_winning_score() {
+        game.state = GameState::Finished;
+        return;
+    }
+
     ball.pos_x = RES_WIDTH/2;
     ball.pos_y = RES_HEIGHT/2;
+    if ball.velocity_x > 0 {
+        ball.velocity_x = BALL_SPEED;
+    } else {
+        ball.velocity_x = -BALL_SPEED;
+    }
+    unsafe {
+        ball.velocity_y = GetRandomValue(-3 - BALL_SPEED, BALL_SPEED + 3);
+    }
     player_one.pos_y = RES_HEIGHT/2;
     player_two.pos_y = RES_HEIGHT/2;
     let can_continue: bool = rl.is_key_down(KeyboardKey::KEY_SPACE);

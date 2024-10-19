@@ -164,10 +164,13 @@ impl Ball {
         self.pos_x = self.pos_x + self.velocity_x;
         self.pos_y = self.pos_y + self.velocity_y;
 
-        if self.pos_y < self.height/2 || self.pos_y > (RES_HEIGHT-self.height/2) {
+        if self.pos_y <= self.height/2 || self.pos_y >= (RES_HEIGHT-self.height/2) {
+            unsafe {
+                PlaySound(game.assets.ball_bounce);
+            }
             self.velocity_y = -self.velocity_y;
-            self.pos_y = if self.pos_y < self.height/2 { self.height/2 } else { self.pos_y };
-            self.pos_y = if self.pos_y > RES_HEIGHT - self.height/2 { RES_HEIGHT - self.height/2 } else { self.pos_y };
+            self.pos_y = if self.pos_y < self.height/2 { self.height/2 + 1 } else { self.pos_y };
+            self.pos_y = if self.pos_y > RES_HEIGHT - self.height/2 { RES_HEIGHT - self.height/2 - 1 } else { self.pos_y };
         }
 
         if self.pos_x < self.width/2 {

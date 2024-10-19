@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ffi::CString};
+use std::path::Path;
 
-use raylib::{ffi::GetRandomValue, prelude::*};
+use raylib::{ffi::{GetRandomValue, LoadSound, PlaySound, Sound}, prelude::*};
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -61,6 +62,13 @@ struct GameContext {
     score_right: i32,
     state: GameState,
     state_menu: StateMenuContext,
+    assets: GameAssets,
+}
+
+struct GameAssets {
+    menu_next: Sound,
+    ball_bounce: Sound,
+    player_scored: Sound,
 }
 
 #[derive(Default)]
@@ -134,20 +142,22 @@ impl Ball {
         let self_rect = self.rect();
         let velocity_y_sign = if self.velocity_y < 0 { -1 } else { 1 };
         if self_rect.check_collision_recs(&player_left.rect()) {
+            self.pos_x = self.pos_x + player_left.width;
+            self.pos_y = self.pos_y + self.velocity_y;
             unsafe {
+                PlaySound(game.assets.ball_bounce);
                 self.velocity_x = -(self.velocity_x + GetRandomValue(0, 5));
                 self.velocity_y = velocity_y_sign * (BALL_SPEED + GetRandomValue(0, 3));
             }
-            self.pos_x = self.pos_x + player_left.width;
-            println!("Velocity x: {} y: {}", self.velocity_x, self.velocity_y);
             return game.state;
         } else if self_rect.check_collision_recs(&player_right.rect()) {
+            self.pos_x = self.pos_x - self.width;
+            self.pos_y = self.pos_y + self.velocity_y;
             unsafe {
+                PlaySound(game.assets.ball_bounce);
                 self.velocity_x = -(self.velocity_x + GetRandomValue(0, 5));
                 self.velocity_y = velocity_y_sign * (BALL_SPEED + GetRandomValue(0, 3));
             }
-            self.pos_x = self.pos_x - self.width;
-            println!("Velocity x: {} y: {}", self.velocity_x, self.velocity_y);
             return game.state;
         }
 
@@ -156,6 +166,8 @@ impl Ball {
 
         if self.pos_y < self.height/2 || self.pos_y > (RES_HEIGHT-self.height/2) {
             self.velocity_y = -self.velocity_y;
+            self.pos_y = if self.pos_y < self.height/2 { self.height/2 } else { self.pos_y };
+            self.pos_y = if self.pos_y > RES_HEIGHT - self.height/2 { RES_HEIGHT - self.height/2 } else { self.pos_y };
         }
 
         if self.pos_x < self.width/2 {
@@ -166,6 +178,12 @@ impl Ball {
             game.score_left = game.score_left + 1;
             self.velocity_x = -self.velocity_x;
             game.state = GameState::Scored;
+        }
+
+        if game.state == GameState::Scored {
+            unsafe {
+                PlaySound(game.assets.player_scored);
+            }
         }
 
         game.state
@@ -190,7 +208,10 @@ fn main() {
         .title("Safe Pong in RUST")
         .build();
 
-    rl.set_target_fps(60);
+    let rl_audio = raylib::audio::RaylibAudio::init_audio_device();
+    if rl_audio.is_err() {
+        println!("Failed to initialize audio device!");
+    }
 
     let mut player_left: Paddle = Paddle {
         pos_x: 0,
@@ -222,12 +243,26 @@ fn main() {
         velocity_y: BALL_SPEED,
     };
 
-    let mut game: GameContext = GameContext {
-        score_left: 0,
-        score_right: 0,
-        state: GameState::Menu,
-        state_menu: Default::default()
-    };
+    println!("Assets path exists: {}", Path::new("assets/ball_bounce.wav").exists());
+    let mut game: GameContext;
+    unsafe {
+        let menu_next_path = CString::new("assets/menu_next.wav").unwrap();
+        let ball_bounce_path = CString::new("assets/ball_bounce.wav").unwrap();
+        let player_scored_path = CString::new("assets/player_scored.wav").unwrap();
+        game = GameContext {
+            score_left: 0,
+            score_right: 0,
+            state: GameState::Menu,
+            state_menu: Default::default(),
+            assets: GameAssets {
+                menu_next: LoadSound(menu_next_path.as_ptr()),
+                ball_bounce: LoadSound(ball_bounce_path.as_ptr()),
+                player_scored: LoadSound(player_scored_path.as_ptr()),
+            }
+        };
+    }
+
+    rl.set_target_fps(60);
 
     while !rl.window_should_close() && game.state != GameState::Quit {
         match game.state {
@@ -287,8 +322,14 @@ fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ba
 
     if rl.is_key_pressed(KeyboardKey::KEY_DOWN) {
         game.state_menu.current = game.state_menu.current.next();
+        unsafe {
+            PlaySound(game.assets.menu_next);
+        }
     } else if rl.is_key_pressed(KeyboardKey::KEY_UP) {
         game.state_menu.current = game.state_menu.current.prev();
+        unsafe {
+            PlaySound(game.assets.menu_next);
+        }
     } else if rl.is_key_pressed(KeyboardKey::KEY_ENTER) {
         if game.state_menu.current == MenuState::Quit {
             game.state = GameState::Quit;

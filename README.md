@@ -1,11 +1,11 @@
-**What**
+**What**  
 Bundle of games created for fun.
 
-**Language**
+**Language**  
 RUST, for no particular reason.
 
-**Framework**
+**Framework**  
 Raylib.
 
-**Resources**
+**Resources**  
 8-bit audio: https://sfxr.me/

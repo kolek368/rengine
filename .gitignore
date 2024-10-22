@@ -1,1 +1,3 @@
 /target
+/backend/certificates/server.key
+/backend/certificates/server.crt

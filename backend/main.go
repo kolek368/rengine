@@ -1,15 +1,18 @@
 package main
 
 import (
-  "fmt"
+  "log"
   "net/http"
 )
 
 func main() {
-  fmt.Println("rengine backend started")
-  http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request){
-    w.Write([]byte("Hello, World!"))
+  log.Println("rengine backend started")
+  http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("Hello, World!\n"))
   })
 
-  http.ListenAndServe(":8080", nil)
+  err := http.ListenAndServe(":8080", nil)
+  if err != nil {
+    log.Fatalln("Failed to start server")
+  }
 }

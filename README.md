@@ -11,7 +11,17 @@ Raylib.
 8-bit audio: https://sfxr.me/
 ***
 ## Build
+### Dependencies
+Multiplayer module uses protobuf to communicate with backend server.
+Read more at: https://github.com/stepancheg/rust-protobuf/tree/master/protobuf-codegen
+`cargo install protobuf-codegen`
+
+### Main application
 `cargo build`
+
+### Backend application
+Check readme in **backend** directory 
+
 ***
 ## Run 
 `cargo run`

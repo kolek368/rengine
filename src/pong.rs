@@ -1,7 +1,10 @@
+use std::fmt::Debug;
 use std::{collections::BTreeMap, ffi::CString};
 use std::path::Path;
 
 use raylib::{ffi::{GetRandomValue, LoadSound, PlaySound, Sound}, prelude::*};
+use websocket::OwnedMessage;
+use websocket::native_tls::TlsConnector;
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -342,9 +345,25 @@ fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball,
 }
 
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, _game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
+    let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
+    let read_ret = ws.recv_message();
+    if read_ret.is_ok() {
+        println!("Server resp: {:?}", read_ret.unwrap());
+    }
+    let msg = OwnedMessage::Text("Hello from mighty rust client!".to_string());
+    let ret = ws.send_message(&msg);
+    if ret.is_err() {
+        println!("Return: ERR::{}", ret.err().unwrap());
+    } else {
+        println!("Return: OK ::{:?}", ret.unwrap());
+    }
+    let _ = ws.shutdown();
+
     let connecting_msg = "Connecting ...";
     let connecting_msg_len = rl.measure_text(&connecting_msg, 40);
     let mut d = rl.begin_drawing(&thread);
+
     d.clear_background(Color::BLACK);
     d.draw_text(&connecting_msg, (RES_WIDTH - connecting_msg_len)/2 , 10, 40, Color::WHITE);
 }

@@ -4,6 +4,8 @@ import (
   "log"
   "net/http"
   "github.com/gorilla/websocket"
+  "rengine-backend/mighty/pong"
+  "google.golang.org/protobuf/proto"
 )
 
 var upgrader = websocket.Upgrader{
@@ -42,7 +44,15 @@ func wsPage(w http.ResponseWriter, r *http.Request) {
     log.Println(err)
   }
   log.Println("Client Connected")
-  err = ws.WriteMessage(1, []byte("Hi Client!"))
+  hello_msg := pong.PongData_CmdHello {
+    Msg: "Hello mighty Client!",
+  }
+  out, err := proto.Marshal(&hello_msg)
+  if err != nil {
+    log.Println("Failed to serialize hello message ", err)
+  }
+  //err = ws.WriteMessage(1, []byte("Hi Client!"))
+  err = ws.WriteMessage(1, out)
   if err != nil {
     log.Println(err)
   }

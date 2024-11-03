@@ -15,24 +15,65 @@ var upgrader = websocket.Upgrader{
 }
 
 func defaultPage(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "text/plain")
-    w.Write([]byte("Mighty backend welcomes you, player!\n"))
+  w.Header().Set("Content-Type", "text/plain")
+  w.Write([]byte("Mighty backend welcomes you, player!\n"))
+}
+
+func handleHello(_ *websocket.Conn, msg *pong.PongData) {
+  log.Println("Hello msg:", msg.GetHello().Msg)
+}
+
+func handleIdReq(conn *websocket.Conn, msg *pong.PongData) {
+  log.Println("Get ID message received")
+  set_id_msg := pong.PongData {
+    Type: pong.DataType_SetId,
+    Data: &pong.PongData_IdRsp{
+      IdRsp : &pong.CmdIdSet{
+        Id: 0xFCB0,
+      },
+    },
+  }
+  out, err := proto.Marshal(&set_id_msg)
+  if err != nil {
+    log.Println("Failed to serialize hello message ", err)
+  }
+
+  err = conn.WriteMessage(1, out)
+  if err != nil {
+    log.Println(err)
+  }
 }
 
 func reader(conn *websocket.Conn) {
   for {
     // read in a message
-    messageType, p, err := conn.ReadMessage()
+    _, p, err := conn.ReadMessage()
     if err != nil {
       log.Println(err)
       return
     }
     // print out that message for clarity
-    log.Println(string(p))
-    if err := conn.WriteMessage(messageType, p); err != nil {
-      log.Println(err)
+    pong_msg := pong.PongData{}
+    if err:= proto.Unmarshal(p, &pong_msg); err != nil {
+      log.Println("Failed to parse pong_msg")
       return
     }
+    log.Println("Pong_msg type:", pong_msg.Type)
+    switch pong_msg.Type {
+    case pong.DataType_Hello:
+      handleIdReq(conn, &pong_msg)
+      break
+    case pong.DataType_GetId:
+      log.Println("Get ID request received")
+      break
+    default:
+      log.Println("Unsupported message received")
+    }
+
+    //if err := conn.WriteMessage(messageType, p); err != nil {
+    //  log.Println(err)
+    //  return
+    //}
   }
 }
 
@@ -52,9 +93,6 @@ func wsPage(w http.ResponseWriter, r *http.Request) {
       },
     },
   }
-  //hello_msg := pong.PongData_CmdHello {
-  //  Msg: "Hello mighty Client!",
-  //}
   out, err := proto.Marshal(&hello_msg)
   if err != nil {
     log.Println("Failed to serialize hello message ", err)

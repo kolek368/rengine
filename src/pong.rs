@@ -13,6 +13,8 @@ use protos::pong::PongData;
 
 use crate::pong::protos::pong::DataType;
 
+use self::protos::pong::{CmdHello, CmdIdGet};
+
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
 
@@ -351,6 +353,31 @@ fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball,
         ball.draw(&mut d);
 }
 
+fn proto_hello_msg(msg: &str) -> OwnedMessage {
+    // hello protobuf message
+    let mut msg_hello: PongData = PongData::new();
+    let cmd_hello: CmdHello = CmdHello{
+        msg: "Hellos from mighty rust Client!".to_string(),
+        special_fields: ::protobuf::SpecialFields::default(),
+    };
+    msg_hello.set_hello(cmd_hello);
+    let ret_msg = OwnedMessage::Binary(msg_hello.write_to_bytes().unwrap());
+    ret_msg
+}
+
+fn proto_id_req_msg() -> OwnedMessage {
+    let mut msg_get_id: PongData = PongData::new();
+    let cmd_get_id: CmdIdGet = CmdIdGet::default();
+    msg_get_id.type_ = DataType::GetId.into();
+    msg_get_id.set_id_req(cmd_get_id);
+    let msg = OwnedMessage::Binary(msg_get_id.write_to_bytes().unwrap());
+    msg
+}
+
+fn srv_get_id() -> u32 {
+    0
+}
+
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, _game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
     let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
@@ -364,7 +391,8 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
             println!("Did not receive hello!");
         }
     }
-    let msg = OwnedMessage::Text("Hello from mighty rust client!".to_string());
+
+    let msg = proto_id_req_msg();
     let ret = ws.send_message(&msg);
     if ret.is_err() {
         println!("Return: ERR::{}", ret.err().unwrap());

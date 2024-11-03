@@ -15,6 +15,7 @@ Raylib.
 Multiplayer module uses protobuf to communicate with backend server.
 Read more at: https://github.com/stepancheg/rust-protobuf/tree/master/protobuf-codegen
 `cargo install protobuf-codegen`
+`cd protobuf && ./build_protobuf.sh`
 
 ### Main application
 `cargo build`

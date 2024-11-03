@@ -1,3 +1,5 @@
 /target
 /backend/certificates/server.key
 /backend/certificates/server.crt
+/src/pong/
+/backend/mighty/

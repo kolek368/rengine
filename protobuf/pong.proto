@@ -1,6 +1,25 @@
 syntax = "proto3";
 option go_package = "mighty/pong";
 
+enum DataType {
+  Hello = 0;
+  GetId = 1;
+  SetId = 2;
+  Ctx = 3;
+}
+
+message CmdHello {
+  string msg = 1;
+}
+
+message CmdIdGet {
+  uint32 dummy = 1;
+}
+
+message CmdIdSet {
+  uint32 id = 1;
+}
+
 message GameCtx {
   uint32 left_id = 1;
   uint32 right_id = 2;
@@ -9,27 +28,9 @@ message GameCtx {
 }
 
 message PongData {
-  //enum DataType {
-  //  Hello = 0;
-  //  GetId = 1;
-  //  SetId = 2;
-  //  GameCtx = 3;
-  //}
-  //DataType type = 1;
+ DataType type = 1;
 
-  message CmdHello {
-    string msg = 1;
-  }
-
-  message CmdIdGet {
-    uint32 dummy = 1;
-  }
-
-  message CmdIdSet {
-    uint32 id = 1;
-  }
-
-  oneof data {
+ oneof data {
     CmdHello hello = 2;
     CmdIdGet id_req = 3;
     CmdIdSet id_rsp = 4;

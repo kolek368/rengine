@@ -2,9 +2,16 @@ use std::fmt::Debug;
 use std::{collections::BTreeMap, ffi::CString};
 use std::path::Path;
 
+use protobuf::Message;
 use raylib::{ffi::{GetRandomValue, LoadSound, PlaySound, Sound}, prelude::*};
+use websocket::ws::dataframe::DataFrame;
 use websocket::OwnedMessage;
 use websocket::native_tls::TlsConnector;
+
+mod protos;
+use protos::pong::PongData;
+
+use crate::pong::protos::pong::DataType;
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -349,7 +356,13 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
     let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
     let read_ret = ws.recv_message();
     if read_ret.is_ok() {
-        println!("Server resp: {:?}", read_ret.unwrap());
+        let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+        println!("Srv_resp: {}", srv_resp.to_string());
+        if DataType::Hello == srv_resp.type_.unwrap() {
+            println!("Server hello msg: {:?} - {}", DataType::Hello, srv_resp.hello().msg);
+        } else {
+            println!("Did not receive hello!");
+        }
     }
     let msg = OwnedMessage::Text("Hello from mighty rust client!".to_string());
     let ret = ws.send_message(&msg);

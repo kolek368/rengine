@@ -44,9 +44,17 @@ func wsPage(w http.ResponseWriter, r *http.Request) {
     log.Println(err)
   }
   log.Println("Client Connected")
-  hello_msg := pong.PongData_CmdHello {
-    Msg: "Hello mighty Client!",
+  hello_msg := pong.PongData {
+    Type: pong.DataType_Hello,
+    Data: &pong.PongData_Hello{
+      Hello: &pong.CmdHello{
+        Msg: "Hello mighty Client!",
+      },
+    },
   }
+  //hello_msg := pong.PongData_CmdHello {
+  //  Msg: "Hello mighty Client!",
+  //}
   out, err := proto.Marshal(&hello_msg)
   if err != nil {
     log.Println("Failed to serialize hello message ", err)

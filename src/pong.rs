@@ -7,6 +7,8 @@ use raylib::{ffi::{GetRandomValue, LoadSound, PlaySound, Sound}, prelude::*};
 use websocket::ws::dataframe::DataFrame;
 use websocket::OwnedMessage;
 use websocket::native_tls::TlsConnector;
+use websocket::sync::Client;
+use websocket::stream::sync::NetworkStream;
 
 mod protos;
 use protos::pong::PongData;
@@ -78,6 +80,7 @@ struct GameContext {
     score_right: i32,
     state: GameState,
     state_menu: StateMenuContext,
+    multiplayer: MultiplayerContext,
     assets: GameAssets,
 }
 
@@ -90,6 +93,12 @@ struct GameAssets {
 #[derive(Default)]
 struct StateMenuContext {
     current: MenuState,
+}
+
+#[derive(Default)]
+struct MultiplayerContext {
+    ws: u32,
+    id: u32,
 }
 
 #[derive(Debug)]
@@ -357,7 +366,7 @@ fn proto_hello_msg(msg: &str) -> OwnedMessage {
     // hello protobuf message
     let mut msg_hello: PongData = PongData::new();
     let cmd_hello: CmdHello = CmdHello{
-        msg: "Hellos from mighty rust Client!".to_string(),
+        msg: msg.to_string(),
         special_fields: ::protobuf::SpecialFields::default(),
     };
     msg_hello.set_hello(cmd_hello);
@@ -374,11 +383,30 @@ fn proto_id_req_msg() -> OwnedMessage {
     msg
 }
 
-fn srv_get_id() -> u32 {
-    0
+fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<u32, String> {
+    let msg = proto_id_req_msg();
+    let ret = ws.send_message(&msg);
+    if ret.is_err() {
+        println!("Return: ERR::{}", ret.err().unwrap());
+    } else {
+        println!("Return: OK ::{:?}", ret.unwrap());
+    }
+     
+    //let read_ret = ws.recv_message();
+    let read_ret = ws.recv_dataframe();
+    if read_ret.is_err() {
+        println!("Error: {}", read_ret.err().unwrap());
+        return Err("Did not receive server response".to_string());
+    }
+    let mut srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+    if srv_resp.type_.unwrap() != DataType::SetId {
+        return Err("Did not receive id response from server".to_string());
+    }
+    println!("Received player id: {:x} from server", srv_resp.take_id_rsp().id);
+    Ok(0)
 }
 
-fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, _game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
     let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
     let read_ret = ws.recv_message();
@@ -391,13 +419,11 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
             println!("Did not receive hello!");
         }
     }
-
-    let msg = proto_id_req_msg();
-    let ret = ws.send_message(&msg);
-    if ret.is_err() {
-        println!("Return: ERR::{}", ret.err().unwrap());
+    let get_it_resp = srv_get_id(&mut ws);
+    if get_it_resp.is_err() {
+        println!("Error: {}", get_it_resp.err().unwrap());
     } else {
-        println!("Return: OK ::{:?}", ret.unwrap());
+        game.multiplayer.id = get_it_resp.unwrap();
     }
     let _ = ws.shutdown();
 
@@ -461,6 +487,7 @@ pub fn pong() {
             score_right: 0,
             state: GameState::Menu,
             state_menu: Default::default(),
+            multiplayer: Default::default(),
             assets: GameAssets {
                 menu_next: LoadSound(menu_next_path.as_ptr()),
                 ball_bounce: LoadSound(ball_bounce_path.as_ptr()),

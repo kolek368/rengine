@@ -23,25 +23,27 @@ func handleHello(_ *websocket.Conn, msg *pong.PongData) {
   log.Println("Hello msg:", msg.GetHello().Msg)
 }
 
-func handleIdReq(conn *websocket.Conn, msg *pong.PongData) {
+func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
   log.Println("Get ID message received")
   set_id_msg := pong.PongData {
     Type: pong.DataType_SetId,
     Data: &pong.PongData_IdRsp{
       IdRsp : &pong.CmdIdSet{
-        Id: 0xFCB0,
+        Id: 0x1234FCB0,
       },
     },
   }
+  log.Println("Sending ID response: {}", &set_id_msg)
   out, err := proto.Marshal(&set_id_msg)
   if err != nil {
     log.Println("Failed to serialize hello message ", err)
   }
-
+  println("Sending: {:?}", out)
   err = conn.WriteMessage(1, out)
   if err != nil {
-    log.Println(err)
+    log.Println("WriteMessage err: {}", err)
   }
+  log.Println("ID response sent")
 }
 
 func reader(conn *websocket.Conn) {
@@ -61,10 +63,10 @@ func reader(conn *websocket.Conn) {
     log.Println("Pong_msg type:", pong_msg.Type)
     switch pong_msg.Type {
     case pong.DataType_Hello:
-      handleIdReq(conn, &pong_msg)
+      handleHello(conn, &pong_msg)
       break
     case pong.DataType_GetId:
-      log.Println("Get ID request received")
+      handleIdReq(conn, &pong_msg)
       break
     default:
       log.Println("Unsupported message received")

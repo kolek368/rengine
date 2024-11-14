@@ -97,8 +97,9 @@ struct StateMenuContext {
 
 #[derive(Default)]
 struct MultiplayerContext {
-    ws: u32,
+    ws: Option<Client<Box<dyn NetworkStream + Send>>>,
     id: u32,
+    session: u32,
 }
 
 #[derive(Debug)]
@@ -362,6 +363,7 @@ fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball,
         ball.draw(&mut d);
 }
 
+#[allow(dead_code)]
 fn proto_hello_msg(msg: &str) -> OwnedMessage {
     // hello protobuf message
     let mut msg_hello: PongData = PongData::new();
@@ -383,7 +385,24 @@ fn proto_id_req_msg() -> OwnedMessage {
     msg
 }
 
-fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<u32, String> {
+fn srv_connect(game: &mut GameContext) {
+    println!("Creating new socket");
+    let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
+    game.multiplayer.ws = Some(websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap());
+    let read_ret = game.multiplayer.ws.as_mut().unwrap().recv_dataframe();
+    println!("Dataframe received");
+    if read_ret.is_ok() {
+        let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+        println!("Srv_resp: {}", srv_resp.to_string());
+        if DataType::Hello == srv_resp.type_.unwrap() {
+            println!("Server hello msg: {:?} - {}", DataType::Hello, srv_resp.hello().msg);
+            } else {
+                println!("Did not receive hello! {:?}", srv_resp.type_.unwrap());
+            }
+    }
+}
+
+fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<(u32, u32), String> {
     let msg = proto_id_req_msg();
     let ret = ws.send_message(&msg);
     if ret.is_err() {
@@ -402,36 +421,33 @@ fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<u32, Str
     if srv_resp.type_.unwrap() != DataType::SetId {
         return Err("Did not receive id response from server".to_string());
     }
-    println!("Received player id: {:x} from server", srv_resp.take_id_rsp().id);
-    Ok(0)
+    let id_resp = srv_resp.take_id_rsp();
+    println!("Received player id: {:x} session id: {:x} from server", id_resp.id, id_resp.session);
+    Ok((0,0))
 }
 
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
-    let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
-    let read_ret = ws.recv_message();
-    if read_ret.is_ok() {
-        let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
-        println!("Srv_resp: {}", srv_resp.to_string());
-        if DataType::Hello == srv_resp.type_.unwrap() {
-            println!("Server hello msg: {:?} - {}", DataType::Hello, srv_resp.hello().msg);
-        } else {
-            println!("Did not receive hello!");
-        }
+    if game.multiplayer.ws.is_none() {
+        srv_connect(game);
+    } else {
+        println!("Socket already exists");
     }
-    let get_it_resp = srv_get_id(&mut ws);
+    println!("Obtaining player id");
+    let get_it_resp = srv_get_id(&mut game.multiplayer.ws.as_mut().unwrap());
     if get_it_resp.is_err() {
         println!("Error: {}", get_it_resp.err().unwrap());
     } else {
-        game.multiplayer.id = get_it_resp.unwrap();
+        let multiplayer_data = get_it_resp.unwrap();
+        game.multiplayer.id = multiplayer_data.0;
+        game.multiplayer.session = multiplayer_data.1;
     }
-    let _ = ws.shutdown();
 
     let connecting_msg = "Connecting ...";
     let connecting_msg_len = rl.measure_text(&connecting_msg, 40);
     let mut d = rl.begin_drawing(&thread);
 
     d.clear_background(Color::BLACK);
+    d.draw_fps(RES_WIDTH-25, 0);
     d.draw_text(&connecting_msg, (RES_WIDTH - connecting_msg_len)/2 , 10, 40, Color::WHITE);
 }
 

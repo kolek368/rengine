@@ -30,7 +30,8 @@ var game_contexts = []GameContext {
   },
 }
 
-var game_sessions map[uint32]GameContext 
+//var game_sessions map[uint32]GameContext 
+var game_sessions = make(map[uint32]*GameContext)
 
 func getGameCtx() *GameContext {
   for i:=0; i < len(game_contexts); i++ {
@@ -77,6 +78,7 @@ func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
       // We do not care if players in other sessions have same id, at least for now
       player_id = (rand.Uint32() << 2) | 0x1
       gameCtx.player_left = player_id
+      game_sessions[sessionId] = gameCtx
     } else {
       log.Println("Context is initialized, generating next player id")
       // Session already initialized, just assign id for the second player
@@ -105,9 +107,39 @@ func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
   println("Sending: {:?}", out)
   err = conn.WriteMessage(1, out)
   if err != nil {
-    log.Println("WriteMessage err: {}", err)
+    log.Println("WriteMessage err:", err)
   }
   log.Println("ID response sent")
+}
+
+func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
+  var sessionId = msg.GetCtxReq().GetSession()
+  log.Println("Get CTX message received for session:", sessionId)
+  ctx, ok := game_sessions[sessionId]
+  if !ok {
+    log.Println("Invalid session id requested")
+    return
+  }
+  
+  log.Println("Left_id: ", ctx.player_left, " Right_id: ", ctx.player_right)
+  set_ctx_msg := pong.PongData {
+    Type: pong.DataType_SetCtx,
+    Data: &pong.PongData_CtxRsp{
+      CtxRsp: &pong.CmdCtxSet {
+        LeftId: ctx.player_left,
+        RightId: ctx.player_right,
+      },
+    },
+  }
+  out, err := proto.Marshal(&set_ctx_msg)
+  if err != nil {
+    log.Println("Failed to serialize set_ctx message", err)
+  }
+  err = conn.WriteMessage(1, out)
+  if err != nil {
+    log.Println("WritMessage err:", err)
+  }
+  log.Println("CTX response sent")
 }
 
 func reader(conn *websocket.Conn) {
@@ -118,7 +150,7 @@ func reader(conn *websocket.Conn) {
       log.Println(err)
       return
     }
-    // print out that message for clarity
+
     pong_msg := pong.PongData{}
     if err:= proto.Unmarshal(p, &pong_msg); err != nil {
       log.Println("Failed to parse pong_msg")
@@ -131,6 +163,9 @@ func reader(conn *websocket.Conn) {
       break
     case pong.DataType_GetId:
       handleIdReq(conn, &pong_msg)
+      break
+    case pong.DataType_GetCtx:
+      handleCtxReq(conn, &pong_msg)
       break
     default:
       log.Println("Unsupported message received")

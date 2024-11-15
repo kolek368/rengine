@@ -15,7 +15,7 @@ use protos::pong::PongData;
 
 use crate::pong::protos::pong::DataType;
 
-use self::protos::pong::{CmdHello, CmdIdGet};
+use self::protos::pong::{CmdCtxGet, CmdCtxSet, CmdHello, CmdIdGet};
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -33,6 +33,7 @@ const BALL_SPEED: i32 = 10;
 enum GameState {
     Menu, // Main menu
     Connect, // Connect to game server
+    Waiting, // Wait for other player
     Init, // Initialize state
     Loop, // Game main loop
     Scored, // Player scored
@@ -100,6 +101,7 @@ struct MultiplayerContext {
     ws: Option<Client<Box<dyn NetworkStream + Send>>>,
     id: u32,
     session: u32,
+    side: Option<ScreenSide>,
 }
 
 #[derive(Debug)]
@@ -385,6 +387,16 @@ fn proto_id_req_msg() -> OwnedMessage {
     msg
 }
 
+fn proto_ctx_req_msg(session: u32) -> OwnedMessage {
+    let mut msg_get_ctx: PongData = PongData::new();
+    let mut cmd_get_ctx: CmdCtxGet = CmdCtxGet::default();
+    cmd_get_ctx.session = session;
+    msg_get_ctx.type_ = DataType::GetCtx.into();
+    msg_get_ctx.set_ctx_req(cmd_get_ctx);
+    let msg = OwnedMessage::Binary(msg_get_ctx.write_to_bytes().unwrap());
+    msg
+}
+
 fn srv_connect(game: &mut GameContext) {
     println!("Creating new socket");
     let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
@@ -422,8 +434,28 @@ fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<(u32, u3
         return Err("Did not receive id response from server".to_string());
     }
     let id_resp = srv_resp.take_id_rsp();
-    println!("Received player id: {:x} session id: {:x} from server", id_resp.id, id_resp.session);
-    Ok((0,0))
+    println!("Received player id: {} session id: {} from server", id_resp.id, id_resp.session);
+    Ok((id_resp.id, id_resp.session))
+}
+
+fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> Result<CmdCtxSet, String> {
+    let msg = proto_ctx_req_msg(session);
+    let ret = ws.send_message(&msg);
+    if ret.is_err() {
+        return Err("Failed to send ctx request.".to_string())
+    }
+
+    let read_ret = ws.recv_dataframe();
+    if read_ret.is_err() {
+        return Err("Did not receive ctx response.".to_string())
+    }
+
+    let mut srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+    if srv_resp.type_.unwrap() != DataType::SetCtx {
+        return Err("Invalid response received".to_string());
+    }
+    let ctx_resp = srv_resp.take_ctx_rsp();
+    Ok(ctx_resp)
 }
 
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
@@ -441,14 +473,58 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
         game.multiplayer.id = multiplayer_data.0;
         game.multiplayer.session = multiplayer_data.1;
     }
+    game.state = GameState::Waiting;
 
     let connecting_msg = "Connecting ...";
     let connecting_msg_len = rl.measure_text(&connecting_msg, 40);
     let mut d = rl.begin_drawing(&thread);
 
     d.clear_background(Color::BLACK);
-    d.draw_fps(RES_WIDTH-25, 0);
     d.draw_text(&connecting_msg, (RES_WIDTH - connecting_msg_len)/2 , 10, 40, Color::WHITE);
+}
+
+fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    const WAITING_MESSAGES: &[&str] = &["Waiting .  ", "Waiting  . ", "Waiting   ."];
+    static mut WAITING_COUNTER: usize = 0;
+    let waiting_msg: &str;
+    let mut send_request: bool = false;
+    // Shame on me for wanting to have an animated waiting screen and using unsafe. Like an animal.
+    unsafe  {
+        waiting_msg = WAITING_MESSAGES[WAITING_COUNTER/60];
+        WAITING_COUNTER = (WAITING_COUNTER + 1) % (WAITING_MESSAGES.len() * 60);
+        if WAITING_COUNTER%60 == 0 {
+            send_request = true;
+        }
+    }
+    let waiting_msg_len = rl.measure_text(&waiting_msg, 40);
+    
+    if send_request {
+        let game_ctx = srv_get_ctx(&mut game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session);
+        if game_ctx.is_err() {
+            println!("Did not receive game context from server.");
+        } else {
+            // If both players have IDs assigned not equal 0xFFFFFFFF it means that we can proceed to
+            // the next state. Also check which side we are assigned.
+            let ctx = game_ctx.unwrap();
+            println!("Left_id: {} Right_id: {}", ctx.left_id, ctx.right_id);
+            if ctx.left_id == game.multiplayer.id {
+                game.multiplayer.side = Some(ScreenSide::Left);
+            } else if ctx.right_id == game.multiplayer.id {
+                game.multiplayer.side = Some(ScreenSide::Right);
+            } else {
+                // Neither player has assigned our Id - must be communicaiton error.
+                println!("Invalid id assigned, could not determine side.")
+            }
+            if ctx.left_id != std::u32::MAX && ctx.right_id != std::u32::MAX {
+                println!("Second player connected, can start the game.")
+            }
+        }
+    }
+
+    let mut d = rl.begin_drawing(&thread);
+
+    d.clear_background(Color::BLACK);
+    d.draw_text(&waiting_msg, (RES_WIDTH - waiting_msg_len)/2 , 10, 40, Color::WHITE);
 }
 
 pub fn pong() {
@@ -517,6 +593,7 @@ pub fn pong() {
     while !rl.window_should_close() && game.state != GameState::Quit {
         match game.state {
             GameState::Connect => connect_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
+            GameState::Waiting => waiting_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Init => init_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Loop => loop_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),
             GameState::Scored => scored_state(&mut player_left, &mut player_right, &mut ball, &mut game, &mut rl, &thread),

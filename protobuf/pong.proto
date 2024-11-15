@@ -5,7 +5,8 @@ enum DataType {
   Hello = 0;
   GetId = 1;
   SetId = 2;
-  Ctx = 3;
+  GetCtx = 3;
+  SetCtx = 4;
 }
 
 message CmdHello {
@@ -21,7 +22,11 @@ message CmdIdSet {
   uint32 session = 2;
 }
 
-message GameCtx {
+message CmdCtxGet {
+  uint32 session = 1;
+}
+
+message CmdCtxSet {
   uint32 left_id = 1;
   uint32 right_id = 2;
   uint32 left_pos = 3;
@@ -35,6 +40,7 @@ message PongData {
     CmdHello hello = 2;
     CmdIdGet id_req = 3;
     CmdIdSet id_rsp = 4;
-    GameCtx game_ctx = 5;
+    CmdCtxGet ctx_req = 5;
+    CmdCtxSet ctx_rsp = 6;
   }
 }

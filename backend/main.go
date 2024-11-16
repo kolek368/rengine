@@ -8,6 +8,7 @@ import (
   "google.golang.org/protobuf/proto"
   "math"
   "math/rand"
+  "sync"
 )
 
 type GameContext struct {
@@ -16,26 +17,38 @@ type GameContext struct {
   player_right uint32
 }
 
+type GameContexts struct {
+  mtx sync.Mutex
+  ctx []GameContext
+}
+
+type ConnectionContext struct {
+  player_id uint32 
+  session_id uint32
+}
+
 var upgrader = websocket.Upgrader{
   ReadBufferSize:  1024,
   WriteBufferSize: 1024,
   CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-var game_contexts = []GameContext {
-  {
-    game_id: math.MaxUint32,
-    player_left: math.MaxUint32,
-    player_right: math.MaxUint32,
+var game_contexts = GameContexts {
+  ctx: []GameContext {
+    {
+      game_id: math.MaxUint32,
+      player_left: math.MaxUint32,
+      player_right: math.MaxUint32,
+    },
   },
 }
 
-//var game_sessions map[uint32]GameContext 
 var game_sessions = make(map[uint32]*GameContext)
+var connected_players = make(map[*websocket.Conn]ConnectionContext)
 
 func getGameCtx() *GameContext {
-  for i:=0; i < len(game_contexts); i++ {
-    ctx := &game_contexts[i]
+  for i:=0; i < len(game_contexts.ctx); i++ {
+    ctx := &game_contexts.ctx[i]
     if ctx.game_id == math.MaxUint32 {
       return ctx
     } else if ctx.player_right == math.MaxUint32 || ctx.player_left == math.MaxUint32 {
@@ -45,19 +58,17 @@ func getGameCtx() *GameContext {
   return nil
 }
 
-func defaultPage(w http.ResponseWriter, r *http.Request) {
-  w.Header().Set("Content-Type", "text/plain")
-  w.Write([]byte("Mighty backend welcomes you, player!\n"))
+func getGameCtxConcurent() *GameContext {
+  game_contexts.mtx.Lock()
+  retval := getGameCtx()
+  game_contexts.mtx.Unlock()
+  return retval
 }
 
-func handleHello(_ *websocket.Conn, msg *pong.PongData) {
-  log.Println("Hello msg:", msg.GetHello().Msg)
-}
-
-func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
-  log.Println("Get ID message received")
+func getSessionIdAndPlayerId() (uint32, uint32) {
   var sessionId uint32 = math.MaxUint32
-  var player_id uint32 = math.MaxUint32
+  var playerId uint32 = math.MaxUint32
+  game_contexts.mtx.Lock()
   var gameCtx = getGameCtx()
   if gameCtx != nil {
     log.Println("Found context")
@@ -75,26 +86,58 @@ func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
       }
       gameCtx.game_id = gameId
       sessionId = gameId
-      // We do not care if players in other sessions have same id, at least for now
-      player_id = (rand.Uint32() << 2) | 0x1
-      gameCtx.player_left = player_id
       game_sessions[sessionId] = gameCtx
+    }
+
+    if gameCtx.player_left == math.MaxUint32 {
+      sessionId = gameCtx.game_id
+      playerId = (gameCtx.game_id << 2) | 0x1
+      gameCtx.player_left = playerId
     } else {
       log.Println("Context is initialized, generating next player id")
-      // Session already initialized, just assign id for the second player
       sessionId = gameCtx.game_id
-      player_id = (gameCtx.player_left << 2) | 0x2
-      gameCtx.player_right = player_id
+      playerId = (gameCtx.game_id << 2) | 0x2
+      gameCtx.player_right = playerId
     }
   } else {
     log.Println("Could not find an empty session!")
   }
+  game_contexts.mtx.Unlock()
+  return sessionId, playerId
+}
 
+func removePlayerFromSession(player uint32, session uint32) {
+  game_contexts.mtx.Lock()
+  ctx, ok := game_sessions[session]
+  if ok {
+    if ctx.player_left == player {
+      ctx.player_left = math.MaxUint32
+    } else if ctx.player_right == player {
+      ctx.player_right = math.MaxUint32
+    } else {
+      log.Println("Invalid player id")
+    }
+  }
+  game_contexts.mtx.Unlock()
+}
+
+func defaultPage(w http.ResponseWriter, r *http.Request) {
+  w.Header().Set("Content-Type", "text/plain")
+  w.Write([]byte("Mighty backend welcomes you, player!\n"))
+}
+
+func handleHello(_ *websocket.Conn, msg *pong.PongData) {
+  log.Println("Hello msg:", msg.GetHello().Msg)
+}
+
+func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
+  log.Println("Get ID message received")
+  var sessionId, playerId = getSessionIdAndPlayerId()
   set_id_msg := pong.PongData {
     Type: pong.DataType_SetId,
     Data: &pong.PongData_IdRsp{
       IdRsp : &pong.CmdIdSet{
-        Id: uint32(player_id),
+        Id: uint32(playerId),
         Session: uint32(sessionId),
       },
     },
@@ -110,6 +153,10 @@ func handleIdReq(conn *websocket.Conn, _ *pong.PongData) {
     log.Println("WriteMessage err:", err)
   }
   log.Println("ID response sent")
+  connected_players[conn] = ConnectionContext{
+    player_id: playerId,
+    session_id: sessionId,
+  }
 }
 
 func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
@@ -147,7 +194,10 @@ func reader(conn *websocket.Conn) {
     // read in a message
     _, p, err := conn.ReadMessage()
     if err != nil {
-      log.Println(err)
+      player_ctx := connected_players[conn]
+      log.Println("ReadMessage error: ", err, " Session: ", player_ctx.session_id, " Player: ", player_ctx.player_id)
+      removePlayerFromSession(player_ctx.player_id, player_ctx.session_id)
+      delete(connected_players, conn)
       return
     }
 

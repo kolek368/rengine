@@ -27,10 +27,11 @@ message CmdCtxGet {
 }
 
 message CmdCtxSet {
-  uint32 left_id = 1;
-  uint32 right_id = 2;
-  uint32 left_pos = 3;
-  uint32 right_pos = 4;
+  uint32 session = 1;
+  uint32 left_id = 2;
+  uint32 right_id = 3;
+  int32 left_pos = 4;
+  int32 right_pos = 5;
 }
 
 message PongData {

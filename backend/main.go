@@ -15,6 +15,8 @@ type GameContext struct {
   game_id uint32
   player_left uint32
   player_right uint32
+  player_left_pos int32
+  player_right_pos int32
 }
 
 type GameContexts struct {
@@ -39,6 +41,8 @@ var game_contexts = GameContexts {
       game_id: math.MaxUint32,
       player_left: math.MaxUint32,
       player_right: math.MaxUint32,
+      player_left_pos: -1,
+      player_right_pos: -1,
     },
   },
 }
@@ -175,6 +179,8 @@ func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
       CtxRsp: &pong.CmdCtxSet {
         LeftId: ctx.player_left,
         RightId: ctx.player_right,
+        LeftPos: ctx.player_left_pos,
+        RightPos: ctx.player_right_pos,
       },
     },
   }
@@ -187,6 +193,24 @@ func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
     log.Println("WritMessage err:", err)
   }
   log.Println("CTX response sent")
+}
+
+func handleCtxRsp(_ *websocket.Conn, msg *pong.PongData) {
+  var sessionId = msg.GetCtxRsp().GetSession()
+  var player_left = msg.GetCtxRsp().GetLeftPos()
+  var player_right = msg.GetCtxRsp().GetRightPos()
+  log.Println("Received context for session:", sessionId)
+  ctx, ok := game_sessions[sessionId]
+  if !ok {
+    log.Println("Invalid session id for context set")
+  }
+
+  if player_left != -1 {
+    ctx.player_left_pos = player_left
+  }
+  if player_right != -1 {
+    ctx.player_right_pos = player_right
+  }
 }
 
 func reader(conn *websocket.Conn) {
@@ -216,6 +240,9 @@ func reader(conn *websocket.Conn) {
       break
     case pong.DataType_GetCtx:
       handleCtxReq(conn, &pong_msg)
+      break
+    case pong.DataType_SetCtx:
+      handleCtxRsp(conn, &pong_msg)
       break
     default:
       log.Println("Unsupported message received")

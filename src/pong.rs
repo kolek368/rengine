@@ -102,6 +102,7 @@ struct MultiplayerContext {
     id: u32,
     session: u32,
     side: Option<ScreenSide>,
+    ctx: Option<CmdCtxSet>,
 }
 
 #[derive(Debug)]
@@ -133,15 +134,44 @@ impl Paddle {
         }
     }
 
-    fn update(&mut self, ctx: &RaylibHandle, _player: &Paddle, _ball: &Ball, game: &mut GameContext) -> GameState {
-        if ctx.is_key_down(self.key_down) && ctx.is_key_down(self.key_up) {
-            return game.state;
+    fn is_local_player(&self, game: &mut GameContext) -> bool {
+        if game.multiplayer.ws.is_none() {
+            // for offline game both players are local
+            return true;
         }
+        
+        if game.multiplayer.side.is_some() && *game.multiplayer.side.as_mut().unwrap() == self.side {
+            return true;
+        }
+        false
+    }
 
-        if self.pos_y > self.height/2 && ctx.is_key_down(self.key_up) {
-            self.pos_y = self.pos_y - PADDLE_SPEED;
-        } else if self.pos_y < (RES_HEIGHT - self.height/2) && ctx.is_key_down(self.key_down) {
-            self.pos_y = self.pos_y + PADDLE_SPEED;
+    fn update(&mut self, ctx: &RaylibHandle, _player: &Paddle, _ball: &Ball, game: &mut GameContext) -> GameState {
+        if self.is_local_player(game) {  
+            if ctx.is_key_down(self.key_down) && ctx.is_key_down(self.key_up) {
+                return game.state;
+            }
+
+            if self.pos_y > self.height/2 && ctx.is_key_down(self.key_up) {
+                self.pos_y = self.pos_y - PADDLE_SPEED;
+            } else if self.pos_y < (RES_HEIGHT - self.height/2) && ctx.is_key_down(self.key_down) {
+                self.pos_y = self.pos_y + PADDLE_SPEED;
+            }
+        } else {
+            if game.multiplayer.ctx.is_none() {
+                return game.state;
+            }
+            if self.side == ScreenSide::Left {
+                let pos = game.multiplayer.ctx.as_mut().unwrap().left_pos;
+                if pos > 0 {
+                    self.pos_y = pos;
+                }
+            } else {
+                let pos = game.multiplayer.ctx.as_mut().unwrap().right_pos;
+                if pos > 0 {
+                    self.pos_y = pos;
+                }
+            }
         }
         game.state
     }
@@ -204,11 +234,11 @@ impl Ball {
         if self.pos_x < self.width/2 {
             game.score_right = game.score_right + 1;
             self.velocity_x = -self.velocity_x;
-            game.state = GameState::Scored;
+            //game.state = GameState::Scored;
         } else if self.pos_x > (RES_WIDTH-self.width/2) {
             game.score_left = game.score_left + 1;
             self.velocity_x = -self.velocity_x;
-            game.state = GameState::Scored;
+            //game.state = GameState::Scored;
         }
 
         if game.state == GameState::Scored {
@@ -315,6 +345,14 @@ fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ba
     }
 }
 
+fn can_game_continue(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, _thread: &RaylibThread) -> bool {
+    if game.multiplayer.ws.is_none() {
+        return rl.is_key_down(KeyboardKey::KEY_SPACE);
+    }
+    false
+}
+
+
 fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     if game.score_right >= get_winning_score() || game.score_left >= get_winning_score() {
         game.state = GameState::Finished;
@@ -333,7 +371,7 @@ fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Bal
     }
     player_one.pos_y = RES_HEIGHT/2;
     player_two.pos_y = RES_HEIGHT/2;
-    let can_continue: bool = rl.is_key_down(KeyboardKey::KEY_SPACE);
+    let can_continue: bool = can_game_continue(player_one, player_two, ball, game, rl, thread);
     let continue_message = "Press SPACE to continue.";
     let mut d = rl.begin_drawing(&thread);
     d.clear_background(Color::BLACK);
@@ -345,24 +383,49 @@ fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Bal
     }
 }
 
+fn srv_multiplayer_update_in(game: &mut GameContext) {
+    if game.multiplayer.ws.is_some() {
+        let game_ctx = srv_get_ctx(&mut game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session);
+        if game_ctx.is_ok() {
+            game.multiplayer.ctx = Some(game_ctx.unwrap());
+        }
+    }
+}
+
+fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, game: &mut GameContext) {
+    if game.multiplayer.ws.is_none() {
+        return;
+    }
+    let mut player_left_pos: i32 = -1;
+    let mut player_right_pos: i32 = -1;
+    if *game.multiplayer.side.as_mut().unwrap() == ScreenSide::Left {
+        player_left_pos = player_one.pos_y;
+    } else {
+        player_right_pos = player_two.pos_y;
+    }
+    srv_set_ctx(game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session, player_left_pos, player_right_pos);
+}
+
 fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-        player_one.update(&rl, &player_two, &ball, game);
-        player_two.update(&rl, &player_one, &ball, game);
-        ball.update(&rl, &player_one, &player_two, game);
-        let score_left = format!("{}", game.score_left);
-        let score_right = format!("{}", game.score_right);
-        let score_right_len = rl.measure_text(&score_right, 40);
+    srv_multiplayer_update_in(game);
+    player_one.update(&rl, &player_two, &ball, game);
+    player_two.update(&rl, &player_one, &ball, game);
+    ball.update(&rl, &player_one, &player_two, game);
+    srv_multiplayer_update_out(player_one, player_two, game);
+    let score_left = format!("{}", game.score_left);
+    let score_right = format!("{}", game.score_right);
+    let score_right_len = rl.measure_text(&score_right, 40);
 
-        let mut d = rl.begin_drawing(&thread);
+    let mut d = rl.begin_drawing(&thread);
 
-        d.clear_background(Color::BLACK);
-        d.draw_text(&score_left, 10, 10, 40, Color::WHITE);
-        d.draw_text(&score_right, RES_WIDTH - 10 - score_right_len, 10, 40, Color::WHITE);
-        d.draw_fps(RES_WIDTH-25, 0);
+    d.clear_background(Color::BLACK);
+    d.draw_text(&score_left, 10, 10, 40, Color::WHITE);
+    d.draw_text(&score_right, RES_WIDTH - 10 - score_right_len, 10, 40, Color::WHITE);
+    d.draw_fps(RES_WIDTH-25, 0);
 
-        player_one.draw(&mut d);
-        player_two.draw(&mut d);
-        ball.draw(&mut d);
+    player_one.draw(&mut d);
+    player_two.draw(&mut d);
+    ball.draw(&mut d);
 }
 
 #[allow(dead_code)]
@@ -394,6 +457,18 @@ fn proto_ctx_req_msg(session: u32) -> OwnedMessage {
     msg_get_ctx.type_ = DataType::GetCtx.into();
     msg_get_ctx.set_ctx_req(cmd_get_ctx);
     let msg = OwnedMessage::Binary(msg_get_ctx.write_to_bytes().unwrap());
+    msg
+}
+
+fn proto_ctx_resp_msg(player_left: i32, player_right: i32, session: u32) -> OwnedMessage {
+    let mut msg_set_ctx: PongData = PongData::new();
+    let mut cmd_set_ctx: CmdCtxSet = CmdCtxSet::default();
+    cmd_set_ctx.session = session;
+    cmd_set_ctx.left_pos = player_left;
+    cmd_set_ctx.right_pos = player_right;
+    msg_set_ctx.type_ = DataType::SetCtx.into();
+    msg_set_ctx.set_ctx_rsp(cmd_set_ctx);
+    let msg = OwnedMessage::Binary(msg_set_ctx.write_to_bytes().unwrap());
     msg
 }
 
@@ -458,6 +533,14 @@ fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> 
     Ok(ctx_resp)
 }
 
+fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32, player_left: i32, player_right: i32) {
+    let msg = proto_ctx_resp_msg(player_left, player_right, session);
+    let ret = ws.send_message(&msg);
+    if ret.is_err() {
+        println!("Failed to send updated local context {:?}", ret.err());
+    }
+}
+
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     if game.multiplayer.ws.is_none() {
         srv_connect(game);
@@ -516,7 +599,8 @@ fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
                 println!("Invalid id assigned, could not determine side.")
             }
             if ctx.left_id != std::u32::MAX && ctx.right_id != std::u32::MAX {
-                println!("Second player connected, can start the game.")
+                println!("Second player connected, can start the game.");
+                game.state = GameState::Loop;
             }
         }
     }

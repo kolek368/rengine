@@ -10,6 +10,10 @@ use websocket::native_tls::TlsConnector;
 use websocket::sync::Client;
 use websocket::stream::sync::NetworkStream;
 
+use std::thread::{self, sleep};
+use std::sync::mpsc::{channel, Sender, Receiver};
+
+
 mod protos;
 use protos::pong::PongData;
 
@@ -103,6 +107,8 @@ struct MultiplayerContext {
     session: u32,
     side: Option<ScreenSide>,
     ctx: Option<CmdCtxSet>,
+    game_rx: Option<Receiver<PongData>>,
+    game_tx: Option<Sender<PongData>>,
 }
 
 #[derive(Debug)]
@@ -385,6 +391,13 @@ fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Bal
 
 fn srv_multiplayer_update_in(game: &mut GameContext) {
     if game.multiplayer.ws.is_some() {
+        let rx_data = game.multiplayer.game_rx.as_mut().unwrap().try_recv();
+        if rx_data.is_ok() {
+            println!("Received data from thread: {}", rx_data.unwrap().take_id_req().dummy);
+        } else {
+            println!("No data available!");
+        }
+
         let game_ctx = srv_get_ctx(&mut game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session);
         if game_ctx.is_ok() {
             game.multiplayer.ctx = Some(game_ctx.unwrap());
@@ -541,6 +554,30 @@ fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32, pla
     }
 }
 
+fn srv_thread(tx: Sender<PongData>, _rx: Receiver<PongData>) {
+    let start_time = std::time::SystemTime::now();
+    loop {
+        let elapsed_time = start_time.elapsed().unwrap().as_secs();
+        let mut msg_get_id: PongData = PongData::new();
+        let mut cmd_get_id: CmdIdGet = CmdIdGet::default();
+        cmd_get_id.dummy = elapsed_time as u32;
+        msg_get_id.type_ = DataType::GetId.into();
+        msg_get_id.set_id_req(cmd_get_id);
+        tx.send(msg_get_id).unwrap();
+        println!("Running communication loop! {}", elapsed_time);
+        sleep(std::time::Duration::from_secs(2));
+
+    }
+}
+
+fn srv_thread_start(game: &mut GameContext) {
+    let (thread_tx, game_rx) = channel::<PongData>();
+    let (game_tx, thread_rx) = channel::<PongData>();
+    game.multiplayer.game_tx = Some(game_tx);
+    game.multiplayer.game_rx = Some(game_rx);
+    thread::spawn(|| srv_thread(thread_tx, thread_rx));
+}
+
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     if game.multiplayer.ws.is_none() {
         srv_connect(game);
@@ -600,6 +637,7 @@ fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
             }
             if ctx.left_id != std::u32::MAX && ctx.right_id != std::u32::MAX {
                 println!("Second player connected, can start the game.");
+                srv_thread_start(game);
                 game.state = GameState::Loop;
             }
         }

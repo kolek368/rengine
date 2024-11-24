@@ -10,7 +10,7 @@ use websocket::native_tls::TlsConnector;
 use websocket::sync::Client;
 use websocket::stream::sync::NetworkStream;
 
-use std::thread::{self, sleep};
+use std::thread::{self, sleep, JoinHandle};
 use std::sync::mpsc::{channel, Sender, Receiver};
 
 
@@ -102,7 +102,7 @@ struct StateMenuContext {
 
 #[derive(Default)]
 struct MultiplayerContext {
-    ws: Option<Client<Box<dyn NetworkStream + Send>>>,
+    thread: Option<JoinHandle<()>>,
     id: u32,
     session: u32,
     side: Option<ScreenSide>,
@@ -141,7 +141,7 @@ impl Paddle {
     }
 
     fn is_local_player(&self, game: &mut GameContext) -> bool {
-        if game.multiplayer.ws.is_none() {
+        if game.multiplayer.thread.is_none() {
             // for offline game both players are local
             return true;
         }
@@ -352,7 +352,7 @@ fn menu_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ba
 }
 
 fn can_game_continue(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, _thread: &RaylibThread) -> bool {
-    if game.multiplayer.ws.is_none() {
+    if game.multiplayer.thread.is_none() {
         return rl.is_key_down(KeyboardKey::KEY_SPACE);
     }
     false
@@ -389,24 +389,8 @@ fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Bal
     }
 }
 
-fn srv_multiplayer_update_in(game: &mut GameContext) {
-    if game.multiplayer.ws.is_some() {
-        let rx_data = game.multiplayer.game_rx.as_mut().unwrap().try_recv();
-        if rx_data.is_ok() {
-            println!("Received data from thread: {}", rx_data.unwrap().take_id_req().dummy);
-        } else {
-            println!("No data available!");
-        }
-
-        let game_ctx = srv_get_ctx(&mut game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session);
-        if game_ctx.is_ok() {
-            game.multiplayer.ctx = Some(game_ctx.unwrap());
-        }
-    }
-}
-
 fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, game: &mut GameContext) {
-    if game.multiplayer.ws.is_none() {
+    if game.multiplayer.thread.is_none() {
         return;
     }
     let mut player_left_pos: i32 = -1;
@@ -416,11 +400,10 @@ fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, 
     } else {
         player_right_pos = player_two.pos_y;
     }
-    srv_set_ctx(game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session, player_left_pos, player_right_pos);
+    // srv_set_ctx(game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session, player_left_pos, player_right_pos);
 }
 
 fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    srv_multiplayer_update_in(game);
     player_one.update(&rl, &player_two, &ball, game);
     player_two.update(&rl, &player_one, &ball, game);
     ball.update(&rl, &player_one, &player_two, game);
@@ -485,11 +468,11 @@ fn proto_ctx_resp_msg(player_left: i32, player_right: i32, session: u32) -> Owne
     msg
 }
 
-fn srv_connect(game: &mut GameContext) {
+fn srv_connect() -> websocket::sync::Client<Box<dyn NetworkStream + std::marker::Send>> {
     println!("Creating new socket");
     let tls_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
-    game.multiplayer.ws = Some(websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap());
-    let read_ret = game.multiplayer.ws.as_mut().unwrap().recv_dataframe();
+    let mut ws = websocket::ClientBuilder::new("wss://127.0.0.1:8443/ws").unwrap().connect(Some(tls_connector)).unwrap();
+    let read_ret = ws.recv_dataframe();
     println!("Dataframe received");
     if read_ret.is_ok() {
         let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
@@ -500,9 +483,10 @@ fn srv_connect(game: &mut GameContext) {
                 println!("Did not receive hello! {:?}", srv_resp.type_.unwrap());
             }
     }
+    ws
 }
 
-fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<(u32, u32), String> {
+fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<PongData, String> {
     let msg = proto_id_req_msg();
     let ret = ws.send_message(&msg);
     if ret.is_err() {
@@ -521,12 +505,11 @@ fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<(u32, u3
     if srv_resp.type_.unwrap() != DataType::SetId {
         return Err("Did not receive id response from server".to_string());
     }
-    let id_resp = srv_resp.take_id_rsp();
-    println!("Received player id: {} session id: {} from server", id_resp.id, id_resp.session);
-    Ok((id_resp.id, id_resp.session))
+    println!("Received player id: {} session id: {} from server", srv_resp.id_rsp().id, srv_resp.id_rsp().session);
+    Ok(srv_resp)
 }
 
-fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> Result<CmdCtxSet, String> {
+fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> Result<PongData, String> {
     let msg = proto_ctx_req_msg(session);
     let ret = ws.send_message(&msg);
     if ret.is_err() {
@@ -542,8 +525,7 @@ fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> 
     if srv_resp.type_.unwrap() != DataType::SetCtx {
         return Err("Invalid response received".to_string());
     }
-    let ctx_resp = srv_resp.take_ctx_rsp();
-    Ok(ctx_resp)
+    Ok(srv_resp)
 }
 
 fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32, player_left: i32, player_right: i32) {
@@ -556,17 +538,33 @@ fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32, pla
 
 fn srv_thread(tx: Sender<PongData>, _rx: Receiver<PongData>) {
     let start_time = std::time::SystemTime::now();
+    let mut session: u32 = std::u32::MAX;
+    let mut ws = srv_connect();
+    let get_it_resp = srv_get_id(&mut ws);
+    if get_it_resp.is_err() {
+        println!("Error: {}", get_it_resp.err().unwrap());
+    } else {
+        let multiplayer_data = get_it_resp.unwrap();
+        println!("Multiplayer data: {:?}", multiplayer_data.id_rsp());
+        session = multiplayer_data.id_rsp().session;
+        println!("Sending data to game loop session: {}", session);
+        tx.send(multiplayer_data).unwrap();
+    }
     loop {
-        let elapsed_time = start_time.elapsed().unwrap().as_secs();
-        let mut msg_get_id: PongData = PongData::new();
-        let mut cmd_get_id: CmdIdGet = CmdIdGet::default();
-        cmd_get_id.dummy = elapsed_time as u32;
-        msg_get_id.type_ = DataType::GetId.into();
-        msg_get_id.set_id_req(cmd_get_id);
-        tx.send(msg_get_id).unwrap();
-        println!("Running communication loop! {}", elapsed_time);
+        let srv_ctx = srv_get_ctx(&mut ws, session);
+        if srv_ctx.is_ok() {
+            println!("Srv_ctx: {:?}", srv_ctx);
+            tx.send(srv_ctx.unwrap()).unwrap();
+        }
+        // let elapsed_time = start_time.elapsed().unwrap().as_secs();
+        // let mut msg_get_id: PongData = PongData::new();
+        // let mut cmd_get_id: CmdIdGet = CmdIdGet::default();
+        // cmd_get_id.dummy = elapsed_time as u32;
+        // msg_get_id.type_ = DataType::GetId.into();
+        // msg_get_id.set_id_req(cmd_get_id);
+        // tx.send(msg_get_id).unwrap();
+        // println!("Running communication loop! {}", elapsed_time);
         sleep(std::time::Duration::from_secs(2));
-
     }
 }
 
@@ -575,25 +573,58 @@ fn srv_thread_start(game: &mut GameContext) {
     let (game_tx, thread_rx) = channel::<PongData>();
     game.multiplayer.game_tx = Some(game_tx);
     game.multiplayer.game_rx = Some(game_rx);
-    thread::spawn(|| srv_thread(thread_tx, thread_rx));
+    game.multiplayer.thread = Some(thread::spawn(|| srv_thread(thread_tx, thread_rx)));
+}
+
+fn multiplayer_is_connected(game: &GameContext) -> bool {
+    if game.multiplayer.id != std::u32::MAX && game.multiplayer.session != std::u32::MAX {
+        return true;
+    }
+    false
+}
+
+fn multiplayer_update(game: &mut GameContext) {
+    println!("Multiplaer update called");
+    if game.multiplayer.thread.is_none() {
+        println!("Multiplaer thread not started");
+        return;
+    }
+    println!("Receiving data from SRV thread");
+
+    let rx_data = game.multiplayer.game_rx.as_mut().unwrap().try_recv();
+    if rx_data.is_err() {
+        println!("No data available!");
+        return;
+    }
+    let mut rx_data = rx_data.unwrap();
+    match rx_data.type_.unwrap() {
+        DataType::SetId => {
+            game.multiplayer.id = rx_data.take_id_rsp().id;
+            game.multiplayer.session = rx_data.take_id_rsp().session;
+            println!("Loop session id: {} player id: {}", game.multiplayer.session, game.multiplayer.id);
+        },
+        DataType::SetCtx => {
+            println!("Loop ctx: {}", rx_data.ctx_rsp());
+            game.multiplayer.ctx = Some(rx_data.take_ctx_rsp());
+        }
+        _ => println!("Received invalid data type from thread: {:?}", rx_data.type_),
+    }
 }
 
 fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    if game.multiplayer.ws.is_none() {
-        srv_connect(game);
+    multiplayer_update(game);
+    if game.multiplayer.thread.is_none() {
+        game.multiplayer.id = std::u32::MAX;
+        game.multiplayer.session = std::u32::MAX;
+        println!("SRV thread starting");
+        srv_thread_start(game);
+        println!("SRV thread started");
     } else {
         println!("Socket already exists");
+        if multiplayer_is_connected(game) {
+            game.state = GameState::Waiting;
+        }
     }
-    println!("Obtaining player id");
-    let get_it_resp = srv_get_id(&mut game.multiplayer.ws.as_mut().unwrap());
-    if get_it_resp.is_err() {
-        println!("Error: {}", get_it_resp.err().unwrap());
-    } else {
-        let multiplayer_data = get_it_resp.unwrap();
-        game.multiplayer.id = multiplayer_data.0;
-        game.multiplayer.session = multiplayer_data.1;
-    }
-    game.state = GameState::Waiting;
 
     let connecting_msg = "Connecting ...";
     let connecting_msg_len = rl.measure_text(&connecting_msg, 40);
@@ -604,6 +635,7 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
 }
 
 fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    multiplayer_update(game);
     const WAITING_MESSAGES: &[&str] = &["Waiting .  ", "Waiting  . ", "Waiting   ."];
     static mut WAITING_COUNTER: usize = 0;
     let waiting_msg: &str;
@@ -619,13 +651,10 @@ fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
     let waiting_msg_len = rl.measure_text(&waiting_msg, 40);
     
     if send_request {
-        let game_ctx = srv_get_ctx(&mut game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session);
-        if game_ctx.is_err() {
-            println!("Did not receive game context from server.");
-        } else {
+        if game.multiplayer.ctx.is_some() {
             // If both players have IDs assigned not equal 0xFFFFFFFF it means that we can proceed to
             // the next state. Also check which side we are assigned.
-            let ctx = game_ctx.unwrap();
+            let ctx = game.multiplayer.ctx.as_ref().unwrap();
             println!("Left_id: {} Right_id: {}", ctx.left_id, ctx.right_id);
             if ctx.left_id == game.multiplayer.id {
                 game.multiplayer.side = Some(ScreenSide::Left);
@@ -637,7 +666,6 @@ fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
             }
             if ctx.left_id != std::u32::MAX && ctx.right_id != std::u32::MAX {
                 println!("Second player connected, can start the game.");
-                srv_thread_start(game);
                 game.state = GameState::Loop;
             }
         }

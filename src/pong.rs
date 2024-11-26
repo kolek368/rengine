@@ -393,6 +393,10 @@ fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, 
     if game.multiplayer.thread.is_none() {
         return;
     }
+
+    if game.multiplayer.side.is_none() {
+        return;
+    }
     let mut player_left_pos: i32 = -1;
     let mut player_right_pos: i32 = -1;
     if *game.multiplayer.side.as_mut().unwrap() == ScreenSide::Left {
@@ -400,14 +404,19 @@ fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, 
     } else {
         player_right_pos = player_two.pos_y;
     }
-    // srv_set_ctx(game.multiplayer.ws.as_mut().unwrap(), game.multiplayer.session, player_left_pos, player_right_pos);
+    let mut cmd_set_ctx: CmdCtxSet = CmdCtxSet::default();
+    cmd_set_ctx.session = game.multiplayer.session;
+    cmd_set_ctx.left_pos = player_left_pos;
+    cmd_set_ctx.right_pos = player_right_pos;
+    let pong_msg = proto_ctx_resp_msg(cmd_set_ctx);
+    game.multiplayer.game_tx.as_mut().unwrap().send(pong_msg).unwrap();
 }
 
 fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
     player_one.update(&rl, &player_two, &ball, game);
     player_two.update(&rl, &player_one, &ball, game);
     ball.update(&rl, &player_one, &player_two, game);
-    srv_multiplayer_update_out(player_one, player_two, game);
+    multiplayer_update(player_one, player_two, game);
     let score_left = format!("{}", game.score_left);
     let score_right = format!("{}", game.score_right);
     let score_right_len = rl.measure_text(&score_right, 40);
@@ -446,26 +455,21 @@ fn proto_id_req_msg() -> OwnedMessage {
     msg
 }
 
-fn proto_ctx_req_msg(session: u32) -> OwnedMessage {
+fn proto_ctx_req_msg(cmd: CmdCtxGet) -> OwnedMessage {
     let mut msg_get_ctx: PongData = PongData::new();
-    let mut cmd_get_ctx: CmdCtxGet = CmdCtxGet::default();
-    cmd_get_ctx.session = session;
+    //let mut cmd_get_ctx: CmdCtxGet = CmdCtxGet::default();
+    //cmd_get_ctx.session = session;
     msg_get_ctx.type_ = DataType::GetCtx.into();
-    msg_get_ctx.set_ctx_req(cmd_get_ctx);
+    msg_get_ctx.set_ctx_req(cmd);
     let msg = OwnedMessage::Binary(msg_get_ctx.write_to_bytes().unwrap());
     msg
 }
 
-fn proto_ctx_resp_msg(player_left: i32, player_right: i32, session: u32) -> OwnedMessage {
+fn proto_ctx_resp_msg(ctx: CmdCtxSet) -> PongData {
     let mut msg_set_ctx: PongData = PongData::new();
-    let mut cmd_set_ctx: CmdCtxSet = CmdCtxSet::default();
-    cmd_set_ctx.session = session;
-    cmd_set_ctx.left_pos = player_left;
-    cmd_set_ctx.right_pos = player_right;
     msg_set_ctx.type_ = DataType::SetCtx.into();
-    msg_set_ctx.set_ctx_rsp(cmd_set_ctx);
-    let msg = OwnedMessage::Binary(msg_set_ctx.write_to_bytes().unwrap());
-    msg
+    msg_set_ctx.set_ctx_rsp(ctx);
+    msg_set_ctx
 }
 
 fn srv_connect() -> websocket::sync::Client<Box<dyn NetworkStream + std::marker::Send>> {
@@ -495,13 +499,12 @@ fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<PongData
         println!("Return: OK ::{:?}", ret.unwrap());
     }
      
-    //let read_ret = ws.recv_message();
     let read_ret = ws.recv_dataframe();
     if read_ret.is_err() {
         println!("Error: {}", read_ret.err().unwrap());
         return Err("Did not receive server response".to_string());
     }
-    let mut srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+    let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
     if srv_resp.type_.unwrap() != DataType::SetId {
         return Err("Did not receive id response from server".to_string());
     }
@@ -510,7 +513,9 @@ fn srv_get_id(ws: &mut Client<Box<dyn NetworkStream + Send>>) -> Result<PongData
 }
 
 fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> Result<PongData, String> {
-    let msg = proto_ctx_req_msg(session);
+    let mut cmd_get_ctx: CmdCtxGet = CmdCtxGet::default();
+    cmd_get_ctx.session = session;
+    let msg = proto_ctx_req_msg(cmd_get_ctx);
     let ret = ws.send_message(&msg);
     if ret.is_err() {
         return Err("Failed to send ctx request.".to_string())
@@ -521,23 +526,22 @@ fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> 
         return Err("Did not receive ctx response.".to_string())
     }
 
-    let mut srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
+    let srv_resp = PongData::parse_from_bytes(&read_ret.unwrap().take_payload()).unwrap();
     if srv_resp.type_.unwrap() != DataType::SetCtx {
         return Err("Invalid response received".to_string());
     }
     Ok(srv_resp)
 }
 
-fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32, player_left: i32, player_right: i32) {
-    let msg = proto_ctx_resp_msg(player_left, player_right, session);
+fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, ctx: PongData) {
+    let msg = OwnedMessage::Binary(ctx.write_to_bytes().unwrap());
     let ret = ws.send_message(&msg);
     if ret.is_err() {
         println!("Failed to send updated local context {:?}", ret.err());
     }
 }
 
-fn srv_thread(tx: Sender<PongData>, _rx: Receiver<PongData>) {
-    let start_time = std::time::SystemTime::now();
+fn srv_thread(tx: Sender<PongData>, rx: Receiver<PongData>) {
     let mut session: u32 = std::u32::MAX;
     let mut ws = srv_connect();
     let get_it_resp = srv_get_id(&mut ws);
@@ -551,20 +555,22 @@ fn srv_thread(tx: Sender<PongData>, _rx: Receiver<PongData>) {
         tx.send(multiplayer_data).unwrap();
     }
     loop {
+        let loop_rx = rx.try_recv();
+        if loop_rx.is_ok() {
+            let pong_msg = loop_rx.unwrap();
+            if pong_msg.type_ == DataType::SetCtx.into() {
+                println!("Srv CTX: {:?}", pong_msg);
+                srv_set_ctx(&mut ws, pong_msg);
+            }
+        } else {
+            sleep(std::time::Duration::from_secs(2));
+        }
+
         let srv_ctx = srv_get_ctx(&mut ws, session);
         if srv_ctx.is_ok() {
-            println!("Srv_ctx: {:?}", srv_ctx);
             tx.send(srv_ctx.unwrap()).unwrap();
         }
-        // let elapsed_time = start_time.elapsed().unwrap().as_secs();
-        // let mut msg_get_id: PongData = PongData::new();
-        // let mut cmd_get_id: CmdIdGet = CmdIdGet::default();
-        // cmd_get_id.dummy = elapsed_time as u32;
-        // msg_get_id.type_ = DataType::GetId.into();
-        // msg_get_id.set_id_req(cmd_get_id);
-        // tx.send(msg_get_id).unwrap();
-        // println!("Running communication loop! {}", elapsed_time);
-        sleep(std::time::Duration::from_secs(2));
+        // sleep(std::time::Duration::from_secs(2));
     }
 }
 
@@ -583,24 +589,21 @@ fn multiplayer_is_connected(game: &GameContext) -> bool {
     false
 }
 
-fn multiplayer_update(game: &mut GameContext) {
-    println!("Multiplaer update called");
+fn multiplayer_update(player_one: &mut Paddle, player_two: &mut Paddle, game: &mut GameContext) {
     if game.multiplayer.thread.is_none() {
         println!("Multiplaer thread not started");
         return;
     }
-    println!("Receiving data from SRV thread");
 
     let rx_data = game.multiplayer.game_rx.as_mut().unwrap().try_recv();
     if rx_data.is_err() {
-        println!("No data available!");
         return;
     }
     let mut rx_data = rx_data.unwrap();
     match rx_data.type_.unwrap() {
         DataType::SetId => {
-            game.multiplayer.id = rx_data.take_id_rsp().id;
-            game.multiplayer.session = rx_data.take_id_rsp().session;
+            game.multiplayer.id = rx_data.id_rsp().id;
+            game.multiplayer.session = rx_data.id_rsp().session;
             println!("Loop session id: {} player id: {}", game.multiplayer.session, game.multiplayer.id);
         },
         DataType::SetCtx => {
@@ -609,10 +612,11 @@ fn multiplayer_update(game: &mut GameContext) {
         }
         _ => println!("Received invalid data type from thread: {:?}", rx_data.type_),
     }
+    srv_multiplayer_update_out(player_one, player_two, game);
 }
 
-fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    multiplayer_update(game);
+fn connect_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    multiplayer_update(player_one, player_two, game);
     if game.multiplayer.thread.is_none() {
         game.multiplayer.id = std::u32::MAX;
         game.multiplayer.session = std::u32::MAX;
@@ -634,8 +638,8 @@ fn connect_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut
     d.draw_text(&connecting_msg, (RES_WIDTH - connecting_msg_len)/2 , 10, 40, Color::WHITE);
 }
 
-fn waiting_state(_player_one: &mut Paddle, _player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    multiplayer_update(game);
+fn waiting_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    multiplayer_update(player_one, player_two, game);
     const WAITING_MESSAGES: &[&str] = &["Waiting .  ", "Waiting  . ", "Waiting   ."];
     static mut WAITING_COUNTER: usize = 0;
     let waiting_msg: &str;

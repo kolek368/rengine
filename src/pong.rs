@@ -19,7 +19,7 @@ use protos::pong::PongData;
 
 use crate::pong::protos::pong::DataType;
 
-use self::protos::pong::{CmdCtxGet, CmdCtxSet, CmdHello, CmdIdGet};
+use self::protos::pong::{CmdCtxGet, CmdCtxSet, CmdHello, CmdIdGet, CmdReady};
 
 const RES_WIDTH: i32 = 1280;
 const RES_HEIGHT: i32 = 720;
@@ -205,6 +205,9 @@ impl Ball {
     fn update(&mut self, _ctx: &RaylibHandle, player_left: &Paddle, player_right: &Paddle, game: &mut GameContext) ->  GameState {
         let self_rect = self.rect();
         let velocity_y_sign = if self.velocity_y < 0 { -1 } else { 1 };
+        self.pos_x = self.pos_x + self.velocity_x;
+        self.pos_y = self.pos_y + self.velocity_y;
+
         if self_rect.check_collision_recs(&player_left.rect()) {
             self.pos_x = self.pos_x + player_left.width;
             self.pos_y = self.pos_y + self.velocity_y;
@@ -224,9 +227,6 @@ impl Ball {
             }
             return game.state;
         }
-
-        self.pos_x = self.pos_x + self.velocity_x;
-        self.pos_y = self.pos_y + self.velocity_y;
 
         if self.pos_y <= self.height/2 || self.pos_y >= (RES_HEIGHT-self.height/2) {
             unsafe {
@@ -389,7 +389,7 @@ fn scored_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Bal
     }
 }
 
-fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, game: &mut GameContext) {
+fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, ball: &Ball, game: &mut GameContext) {
     if game.multiplayer.thread.is_none() {
         return;
     }
@@ -408,7 +408,31 @@ fn srv_multiplayer_update_out(player_one: &mut Paddle, player_two: &mut Paddle, 
     cmd_set_ctx.session = game.multiplayer.session;
     cmd_set_ctx.left_pos = player_left_pos;
     cmd_set_ctx.right_pos = player_right_pos;
+    let ctx = game.multiplayer.ctx.as_mut().unwrap();
+    if game.multiplayer.id == ctx.ball_master {
+        println!("Current master. Updating Ball: vx:{} vy:{} px:{} py:{}", ball.velocity_x, ball.velocity_y, ball.pos_x, ball.pos_y);
+        cmd_set_ctx.ball_vx = ball.velocity_x;
+        cmd_set_ctx.ball_vy = ball.velocity_y;
+        cmd_set_ctx.ball_posx = ball.pos_x;
+        cmd_set_ctx.ball_posy = ball.pos_y;
+    } else {
+        cmd_set_ctx.ball_vx = std::i32::MAX;
+        cmd_set_ctx.ball_vy = std::i32::MAX;
+    }
     let pong_msg = proto_ctx_resp_msg(cmd_set_ctx);
+    game.multiplayer.game_tx.as_mut().unwrap().send(pong_msg).unwrap();
+}
+
+fn srv_multiplayer_update_ready(game: &mut GameContext) {
+    if game.multiplayer.thread.is_none() {
+        return;
+    }
+
+    println!("Sending Ready signal to SRV_THREAD");
+    let mut cmd_ready: CmdReady = CmdReady::default();
+    cmd_ready.session = game.multiplayer.session;
+    cmd_ready.player = game.multiplayer.id;
+    let pong_msg = proto_ready_msg(cmd_ready);
     game.multiplayer.game_tx.as_mut().unwrap().send(pong_msg).unwrap();
 }
 
@@ -416,7 +440,7 @@ fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball,
     player_one.update(&rl, &player_two, &ball, game);
     player_two.update(&rl, &player_one, &ball, game);
     ball.update(&rl, &player_one, &player_two, game);
-    multiplayer_update(player_one, player_two, game);
+    multiplayer_update(player_one, player_two, ball, game);
     let score_left = format!("{}", game.score_left);
     let score_right = format!("{}", game.score_right);
     let score_right_len = rl.measure_text(&score_right, 40);
@@ -424,8 +448,8 @@ fn loop_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball,
     let mut d = rl.begin_drawing(&thread);
 
     d.clear_background(Color::BLACK);
-    d.draw_text(&score_left, 10, 10, 40, Color::WHITE);
-    d.draw_text(&score_right, RES_WIDTH - 10 - score_right_len, 10, 40, Color::WHITE);
+    d.draw_text(&score_left, PADDLE_WIDTH + 10, 10, 40, Color::WHITE);
+    d.draw_text(&score_right, RES_WIDTH - 10 - PADDLE_WIDTH - score_right_len, 10, 40, Color::WHITE);
     d.draw_fps(RES_WIDTH-25, 0);
 
     player_one.draw(&mut d);
@@ -457,8 +481,6 @@ fn proto_id_req_msg() -> OwnedMessage {
 
 fn proto_ctx_req_msg(cmd: CmdCtxGet) -> OwnedMessage {
     let mut msg_get_ctx: PongData = PongData::new();
-    //let mut cmd_get_ctx: CmdCtxGet = CmdCtxGet::default();
-    //cmd_get_ctx.session = session;
     msg_get_ctx.type_ = DataType::GetCtx.into();
     msg_get_ctx.set_ctx_req(cmd);
     let msg = OwnedMessage::Binary(msg_get_ctx.write_to_bytes().unwrap());
@@ -470,6 +492,13 @@ fn proto_ctx_resp_msg(ctx: CmdCtxSet) -> PongData {
     msg_set_ctx.type_ = DataType::SetCtx.into();
     msg_set_ctx.set_ctx_rsp(ctx);
     msg_set_ctx
+}
+
+fn proto_ready_msg(ctx: CmdReady) -> PongData {
+    let mut msg_ready: PongData = PongData::new();
+    msg_ready.type_ = DataType::Ready.into();
+    msg_ready.set_ready(ctx);
+    msg_ready
 }
 
 fn srv_connect() -> websocket::sync::Client<Box<dyn NetworkStream + std::marker::Send>> {
@@ -533,7 +562,7 @@ fn srv_get_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, session: u32) -> 
     Ok(srv_resp)
 }
 
-fn srv_set_ctx(ws: &mut Client<Box<dyn NetworkStream + Send>>, ctx: PongData) {
+fn srv_send_data(ws: &mut Client<Box<dyn NetworkStream + Send>>, ctx: PongData) {
     let msg = OwnedMessage::Binary(ctx.write_to_bytes().unwrap());
     let ret = ws.send_message(&msg);
     if ret.is_err() {
@@ -560,10 +589,13 @@ fn srv_thread(tx: Sender<PongData>, rx: Receiver<PongData>) {
             let pong_msg = loop_rx.unwrap();
             if pong_msg.type_ == DataType::SetCtx.into() {
                 println!("Srv CTX: {:?}", pong_msg);
-                srv_set_ctx(&mut ws, pong_msg);
+                srv_send_data(&mut ws, pong_msg);
+            } else if pong_msg.type_ == DataType::Ready.into() {
+                println!("Srv READY: {:?}", pong_msg);
+                srv_send_data(&mut ws, pong_msg);
             }
         } else {
-            sleep(std::time::Duration::from_secs(2));
+            sleep(std::time::Duration::from_millis(20));
         }
 
         let srv_ctx = srv_get_ctx(&mut ws, session);
@@ -589,7 +621,7 @@ fn multiplayer_is_connected(game: &GameContext) -> bool {
     false
 }
 
-fn multiplayer_update(player_one: &mut Paddle, player_two: &mut Paddle, game: &mut GameContext) {
+fn multiplayer_update(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext) {
     if game.multiplayer.thread.is_none() {
         println!("Multiplaer thread not started");
         return;
@@ -607,16 +639,27 @@ fn multiplayer_update(player_one: &mut Paddle, player_two: &mut Paddle, game: &m
             println!("Loop session id: {} player id: {}", game.multiplayer.session, game.multiplayer.id);
         },
         DataType::SetCtx => {
-            println!("Loop ctx: {}", rx_data.ctx_rsp());
+            //println!("Loop ctx: {}", rx_data.ctx_rsp());
+            if rx_data.ctx_rsp().ball_master != game.multiplayer.id {
+                if rx_data.ctx_rsp().ball_vy != std::i32::MAX && rx_data.ctx_rsp().ball_vx != std::i32::MAX {
+                    ball.velocity_x = rx_data.ctx_rsp().ball_vx;
+                    ball.velocity_y = rx_data.ctx_rsp().ball_vy;
+                }
+                if rx_data.ctx_rsp().ball_master != std::u32::MAX &&  rx_data.ctx_rsp().ball_posx != std::i32::MAX && rx_data.ctx_rsp().ball_posx != std::i32::MAX {
+                        ball.pos_x = rx_data.ctx_rsp().ball_posx;
+                        ball.pos_y = rx_data.ctx_rsp().ball_posy;
+                }
+            }
             game.multiplayer.ctx = Some(rx_data.take_ctx_rsp());
+            //println!("Ball vx: {} vy: {}", ball.velocity_x, ball.velocity_y);
         }
         _ => println!("Received invalid data type from thread: {:?}", rx_data.type_),
     }
-    srv_multiplayer_update_out(player_one, player_two, game);
+    srv_multiplayer_update_out(player_one, player_two, ball, game);
 }
 
-fn connect_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    multiplayer_update(player_one, player_two, game);
+fn connect_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    multiplayer_update(player_one, player_two, ball, game);
     if game.multiplayer.thread.is_none() {
         game.multiplayer.id = std::u32::MAX;
         game.multiplayer.session = std::u32::MAX;
@@ -638,8 +681,8 @@ fn connect_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut B
     d.draw_text(&connecting_msg, (RES_WIDTH - connecting_msg_len)/2 , 10, 40, Color::WHITE);
 }
 
-fn waiting_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
-    multiplayer_update(player_one, player_two, game);
+fn waiting_state(player_one: &mut Paddle, player_two: &mut Paddle, ball: &mut Ball, game: &mut GameContext, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    multiplayer_update(player_one, player_two, ball, game);
     const WAITING_MESSAGES: &[&str] = &["Waiting .  ", "Waiting  . ", "Waiting   ."];
     static mut WAITING_COUNTER: usize = 0;
     let waiting_msg: &str;
@@ -670,6 +713,7 @@ fn waiting_state(player_one: &mut Paddle, player_two: &mut Paddle, _ball: &mut B
             }
             if ctx.left_id != std::u32::MAX && ctx.right_id != std::u32::MAX {
                 println!("Second player connected, can start the game.");
+                srv_multiplayer_update_ready(game);
                 game.state = GameState::Loop;
             }
         }

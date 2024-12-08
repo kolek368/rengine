@@ -12,11 +12,35 @@ import (
 )
 
 type GameContext struct {
+  // ID if game session in case more sessions are supported
   game_id uint32
+  // ID of left player
   player_left uint32
+  // ID of right player
   player_right uint32
+  // Y position coordinate of left player
   player_left_pos int32
+  // Y position coordinate of right player
   player_right_pos int32
+  // Indicator that left player is ready to start game
+  player_left_ready bool
+  // Indicator that right player is ready to start game
+  player_right_ready bool
+  // Ball speed in X axis
+  ball_vx int32
+  // Ball speed in Y axis
+  ball_vy int32
+  // X position coordinate of ball
+  // server can set ball position only to MaxInt32 when game starts
+  // in other cases ball coordinates are sent by ball master
+  // this way doesn to nned to know game resolution
+  ball_posx int32
+  // Y position coordinate of ball
+  ball_posy int32
+  // ID of player in which ball is currently directed
+  // it is master because only that player can
+  // impact on ball behavior
+  ball_master uint32
 }
 
 type GameContexts struct {
@@ -43,6 +67,8 @@ var game_contexts = GameContexts {
       player_right: math.MaxUint32,
       player_left_pos: -1,
       player_right_pos: -1,
+      ball_vx: 0,
+      ball_vy: 0,
     },
   },
 }
@@ -89,6 +115,11 @@ func getSessionIdAndPlayerId() (uint32, uint32) {
         }
       }
       gameCtx.game_id = gameId
+      gameCtx.ball_vx = math.MaxInt32
+      gameCtx.ball_vy = math.MaxInt32
+      gameCtx.ball_posx = math.MaxInt32
+      gameCtx.ball_posy = math.MaxInt32
+      gameCtx.ball_master = math.MaxUint32
       sessionId = gameId
       game_sessions[sessionId] = gameCtx
     }
@@ -172,7 +203,8 @@ func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
     return
   }
   
-  log.Println("Left_id: ", ctx.player_left, " Right_id: ", ctx.player_right)
+  log.Println("Left_id: ", ctx.player_left, " Right_id: ", ctx.player_right, " Ball vx: ", ctx.ball_vx, " vy: ", ctx.ball_vy)
+  log.Println("Left_rdy: ", ctx.player_left_ready, " Right_rdy: ", ctx.player_right_ready)
   set_ctx_msg := pong.PongData {
     Type: pong.DataType_SetCtx,
     Data: &pong.PongData_CtxRsp{
@@ -181,6 +213,11 @@ func handleCtxReq(conn *websocket.Conn, msg *pong.PongData) {
         RightId: ctx.player_right,
         LeftPos: ctx.player_left_pos,
         RightPos: ctx.player_right_pos,
+        BallVx: ctx.ball_vx,
+        BallVy: ctx.ball_vy,
+        BallPosx: ctx.ball_posx,
+        BallPosy: ctx.ball_posy,
+        BallMaster: ctx.ball_master,
       },
     },
   }
@@ -199,17 +236,66 @@ func handleCtxRsp(_ *websocket.Conn, msg *pong.PongData) {
   var sessionId = msg.GetCtxRsp().GetSession()
   var player_left = msg.GetCtxRsp().GetLeftPos()
   var player_right = msg.GetCtxRsp().GetRightPos()
+  var ball_vx = msg.GetCtxRsp().GetBallVx()
+  var ball_vy = msg.GetCtxRsp().GetBallVy()
+  var ball_posx = msg.GetCtxRsp().GetBallPosx()
+  var ball_posy = msg.GetCtxRsp().GetBallPosy()
   log.Println("Received context for session:", sessionId)
   ctx, ok := game_sessions[sessionId]
   if !ok {
     log.Println("Invalid session id for context set")
+    return
   }
 
   if player_left != -1 {
     ctx.player_left_pos = player_left
   }
+
   if player_right != -1 {
     ctx.player_right_pos = player_right
+  }
+
+  if !(ctx.player_left_ready && ctx.player_right_ready) {
+    return
+  }
+
+  if ball_vx != math.MaxInt32 && ball_vy != math.MaxInt32 {
+    ctx.ball_vx = ball_vx
+    ctx.ball_vy = ball_vy
+    ctx.ball_posx = ball_posx
+    ctx.ball_posy = ball_posy
+    if ball_vx > 0 {
+      ctx.ball_master = ctx.player_right
+    } else {
+      ctx.ball_master = ctx.player_left
+    }
+  }
+
+}
+
+func handleReady(_ *websocket.Conn, msg *pong.PongData) {
+  var sessionId = msg.GetReady().GetSession()
+  var playerId = msg.GetReady().GetPlayer()
+  ctx, ok := game_sessions[sessionId]
+  if !ok {
+    log.Println("Invalid session id for ready cmd")
+  }
+
+  if playerId == ctx.player_left {
+    ctx.player_left_ready = true;
+  } else if playerId == ctx.player_right {
+    ctx.player_right_ready = true;
+  } else {
+    log.Println("Invalid player ID for ready cmd")
+  }
+
+  if ctx.player_left_ready && ctx.player_right_ready {
+    // generate ball x and y speed
+    ctx.ball_vx = 5;
+    ctx.ball_vy = 5;
+    ctx.ball_posx = math.MaxInt32;
+    ctx.ball_posy = math.MaxInt32;
+    ctx.ball_master = ctx.player_right
   }
 }
 
@@ -244,6 +330,8 @@ func reader(conn *websocket.Conn) {
     case pong.DataType_SetCtx:
       handleCtxRsp(conn, &pong_msg)
       break
+    case pong.DataType_Ready:
+      handleReady(conn, &pong_msg)
     default:
       log.Println("Unsupported message received")
     }
